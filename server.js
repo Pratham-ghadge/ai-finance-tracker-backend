@@ -1,18 +1,12 @@
 // backend/server.js
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import dotenv from 'dotenv';
 import sql, { testConnection } from './config/database.js';
-
-// Import routes
-import authRoutes from './routes/auth.js';
-import transactionRoutes from './routes/transactions.js';
-import dashboardRoutes from './routes/dashboard.js';
-import accountRoutes from './routes/accounts.js';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -29,8 +23,23 @@ app.use(helmet());
 app.use(limiter);
 
 // CORS
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://ai-finance-tracker-frontend.vercel.app',
+  'https://ai-finance-tracker-frontend-three.vercel.app', // Added common pattern
+  /\.vercel\.app$/ // Allow any vercel.app subdomain for easier deployment
+];
+
 app.use(cors({
-  origin: true, // Allow all origins in development
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
@@ -59,7 +68,7 @@ app.get('/api/health', async (req, res) => {
   try {
     const result = await sql`SELECT version()`;
     const { version } = result[0];
-    res.json({ 
+    res.json({
       message: 'Finance Tracker API is running 🚀',
       database: {
         status: 'connected',
@@ -90,7 +99,7 @@ app.get('/api/test', async (req, res) => {
 // Test body parsing endpoint
 app.post('/api/test-body', (req, res) => {
   console.log('✅ Test body endpoint - Body received:', req.body);
-  res.json({ 
+  res.json({
     message: 'Body parsing is working!',
     receivedBody: req.body,
     bodyType: typeof req.body
@@ -104,12 +113,12 @@ app.use('/api/test-body', (req, res, next) => next()); // Skip for test-body rou
 
 // Custom 404 handler without wildcards
 app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') && 
-      !req.path.startsWith('/api/health') &&
-      !req.path.startsWith('/api/test') &&
-      !req.path.startsWith('/api/test-body')) {
+  if (req.path.startsWith('/api/') &&
+    !req.path.startsWith('/api/health') &&
+    !req.path.startsWith('/api/test') &&
+    !req.path.startsWith('/api/test-body')) {
     console.log('❌ 404 - API endpoint not found:', req.originalUrl);
-    return res.status(404).json({ 
+    return res.status(404).json({
       error: 'API endpoint not found',
       path: req.originalUrl,
       method: req.method,
@@ -121,7 +130,7 @@ app.use((req, res, next) => {
 
 // General 404 handler
 app.use((req, res) => {
-  res.status(404).json({ 
+  res.status(404).json({
     error: 'Route not found',
     message: 'This route does not exist. Available API routes start with /api/'
   });
@@ -130,7 +139,7 @@ app.use((req, res) => {
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('🚨 Server error:', error);
-  res.status(500).json({ 
+  res.status(500).json({
     error: 'Internal server error',
     ...(process.env.NODE_ENV === 'development' && { details: error.message })
   });
@@ -147,10 +156,8 @@ async function checkDatabaseConnection() {
 
 // Start server
 app.listen(PORT, async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔧 Test endpoint: http://localhost:${PORT}/api/test`);
-  console.log(`📝 Test body parsing: POST http://localhost:${PORT}/api/test-body`);
+  console.log(`🚀 Production-ready server running on port ${PORT}`);
+  console.log(`📊 Health check: /api/health`);
   await checkDatabaseConnection();
 });
 
