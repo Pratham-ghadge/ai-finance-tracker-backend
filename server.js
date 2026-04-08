@@ -8,6 +8,12 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import sql, { testConnection } from './config/database.js';
 
+// Route Imports
+import authRoutes from './routes/auth.js';
+import transactionRoutes from './routes/transactions.js';
+import dashboardRoutes from './routes/dashboard.js';
+import accountRoutes from './routes/accounts.js';
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
