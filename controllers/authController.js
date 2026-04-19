@@ -1,158 +1,91 @@
-// backend/controllers/authController.js
-import sql from '../config/database.js';
-import { hashPassword, comparePassword, generateToken } from '../config/auth.js';
+import User from '../models/User.js';
+import { comparePassword, generateToken, hashPassword } from '../config/auth.js';
+import { serializeUser } from '../utils/serializers.js';
 
 export const register = async (req, res) => {
-  try {
-    console.log('📨 Register request received - Full request:', {
-      body: req.body,
-      headers: req.headers,
-      method: req.method,
-      url: req.url
-    });
+  const { name, email, password } = req.body;
 
-    // Check if request body exists and has the expected properties
-    if (!req.body || typeof req.body !== 'object') {
-      console.log('❌ Request body is missing or invalid');
-      return res.status(400).json({ error: 'Request body is required and must be JSON' });
-    }
-
-    const { email, password, name } = req.body;
-    const trimmedEmail = email?.trim();
-
-    console.log('🔍 Extracted fields:', { email: trimmedEmail, password: password ? '***' : 'missing', name });
-
-    // Check if fields exist (not just truthy, but actually present)
-    if (trimmedEmail === undefined || password === undefined || name === undefined) {
-      return res.status(400).json({
-        error: 'All fields are required: email, password, name',
-        received: { email: trimmedEmail !== undefined, password: password !== undefined, name: name !== undefined }
-      });
-    }
-
-    // Check if fields are not empty
-    if (!trimmedEmail || !password || !name) {
-      return res.status(400).json({
-        error: 'All fields must not be empty',
-        received: { email: !!trimmedEmail, password: !!password, name: !!name }
-      });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(trimmedEmail)) {
-      return res.status(400).json({ error: 'Invalid email format' });
-    }
-
-    // Validate password length
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
-    }
-
-    console.log('🔍 Checking if user exists in database:', trimmedEmail);
-
-    // Check if user exists - USING NEON SQL
-    const existingUsers = await sql`
-      SELECT id FROM users WHERE email = ${trimmedEmail}
-    `;
-
-    if (existingUsers && existingUsers.length > 0) {
-      return res.status(400).json({ error: 'User already exists' });
-    }
-
-    console.log('🔐 Hashing password...');
-    // Hash password and create user
-    const hashedPassword = await hashPassword(password);
-
-    console.log('👤 Creating user in database...');
-    // Create user - USING NEON SQL
-    const newUser = await sql`
-      INSERT INTO users (email, password, name) 
-      VALUES (${trimmedEmail}, ${hashedPassword}, ${name}) 
-      RETURNING id, email, name
-    `;
-
-    const token = generateToken(newUser[0].id);
-
-    console.log('✅ User created successfully:', newUser[0].email);
-
-    res.status(201).json({
-      message: 'User created successfully',
-      token,
-      user: {
-        id: newUser[0].id,
-        email: newUser[0].email,
-        name: newUser[0].name
-      }
-    });
-  } catch (error) {
-    console.error('❌ Register error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'Name, email, and password are required' });
   }
+
+  if (password.length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+  }
+
+  const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+  if (existingUser) {
+    return res.status(400).json({ message: 'User already exists with this email' });
+  }
+
+  const user = await User.create({
+    name: name.trim(),
+    email: email.trim().toLowerCase(),
+    password: await hashPassword(password),
+  });
+
+  return res.status(201).json({
+    success: true,
+    token: generateToken(user._id.toString()),
+    user: serializeUser(user),
+  });
 };
 
 export const login = async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+
+  const user = await User.findOne({ email: email.trim().toLowerCase() });
+  if (!user) {
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+
+  const isValidPassword = await comparePassword(password, user.password);
+  if (!isValidPassword) {
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+
+  return res.json({
+    success: true,
+    token: generateToken(user._id.toString()),
+    user: serializeUser(user),
+  });
+};
+
+export const getProfile = async (req, res) => {
+  res.json({
+    success: true,
+    user: serializeUser(req.user),
+  });
+};
+
+export const updateProfile = async (req, res) => {
+  const { name, familyDetails } = req.body;
+
   try {
-    console.log('📨 Login request received:', {
-      email: req.body?.email,
-      headers: req.headers
-    });
-
-    // Check if request body exists
-    if (!req.body || typeof req.body !== 'object') {
-      return res.status(400).json({ error: 'Request body is required and must be JSON' });
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(4404).json({ message: 'User not found' });
     }
 
-    const { email, password } = req.body;
-    const trimmedEmail = email?.trim();
-
-    // Validate required fields
-    if (!trimmedEmail || !password) {
-      return res.status(400).json({
-        error: 'Email and password are required'
-      });
+    if (name) user.name = name;
+    if (familyDetails) {
+      user.familyDetails = {
+        ...user.familyDetails,
+        ...familyDetails,
+      };
     }
 
-    console.log('🔍 Finding user:', trimmedEmail);
-
-    // USING NEON SQL
-    const users = await sql`
-      SELECT * FROM users WHERE email = ${trimmedEmail}
-    `;
-
-    if (!users || users.length === 0) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
-
-    const user = users[0];
-    console.log('🔐 Comparing passwords...');
-    const isMatch = await comparePassword(password, user.password);
-
-    if (!isMatch) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
-
-    const token = generateToken(user.id);
-
-    console.log('✅ Login successful:', user.email);
+    await user.save();
 
     res.json({
-      message: 'Login successful',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name
-      }
+      success: true,
+      user: serializeUser(user),
     });
   } catch (error) {
-    console.error('❌ Login error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ message: 'Error updating profile' });
   }
 };

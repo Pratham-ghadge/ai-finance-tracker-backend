@@ -1,395 +1,248 @@
-// backend/controllers/transactionController.js
-import sql from '../config/database.js';
+import Account from '../models/Account.js';
+import Transaction from '../models/Transaction.js';
+import { expenseCategories, incomeCategories } from '../utils/constants.js';
+import { parseCsvTransactions, parseSmsTransactions } from '../utils/parsers.js';
+import { serializeTransaction } from '../utils/serializers.js';
+
+const getAllowedCategories = (type) => (type === 'INCOME' ? incomeCategories : expenseCategories);
+const signedAmount = (type, amount) => (type === 'INCOME' ? amount : -amount);
+
+const validateCategory = (type, category) => {
+  const allowedCategories = getAllowedCategories(type);
+  return allowedCategories.includes(category) ? category : allowedCategories[allowedCategories.length - 1];
+};
+
+const getUserAccount = async (userId, accountId) =>
+  Account.findOne({
+    _id: accountId,
+    user: userId,
+  });
+
+const applyAccountDelta = async (accountId, delta) => {
+  await Account.findByIdAndUpdate(accountId, {
+    $inc: { balance: delta },
+  });
+};
+
+const buildTransactionPayload = (body, fallbackSource = 'MANUAL') => ({
+  type: body.type === 'INCOME' ? 'INCOME' : 'EXPENSE',
+  amount: Number(body.amount),
+  category: validateCategory(body.type, body.category),
+  date: body.date ? new Date(body.date) : new Date(),
+  description: body.description?.trim() || 'Transaction',
+  source: body.source || fallbackSource,
+  smsRaw: body.smsRaw || '',
+  importBatchId: body.importBatchId || '',
+});
 
 export const addTransaction = async (req, res) => {
-  try {
-    console.log('🔄 Adding transaction:', req.body);
-    
-    const {
-      type,
-      amount,
-      description,
-      date,
-      category,
-      receiptUrl,
-      isRecurring = false,
-      recurringInterval,
-      nextRecurringDate,
-      accountId
-    } = req.body;
-    
-    const userId = req.userId;
+  const { accountId } = req.body;
+  const account = await getUserAccount(req.userId, accountId);
 
-    // Handle empty dates - convert to null
-    const processedNextRecurringDate = nextRecurringDate && nextRecurringDate !== '' 
-      ? nextRecurringDate 
-      : null;
-    
-    const processedRecurringInterval = (isRecurring && recurringInterval) 
-      ? recurringInterval 
-      : null;
-
-    console.log('📝 Processed transaction data:', {
-      isRecurring,
-      recurringInterval: processedRecurringInterval,
-      nextRecurringDate: processedNextRecurringDate
-    });
-
-    // First, verify the account belongs to the user
-    const accountCheck = await sql`
-      SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId}
-    `;
-
-    if (accountCheck.length === 0) {
-      return res.status(404).json({ 
-        error: 'Account not found or access denied' 
-      });
-    }
-
-    // Insert transaction
-    const transactionResult = await sql`
-      INSERT INTO transactions 
-      (type, amount, description, date, category, receipt_url, is_recurring, 
-       recurring_interval, next_recurring_date, user_id, account_id) 
-      VALUES (
-        ${type}, 
-        ${parseFloat(amount)}, 
-        ${description}, 
-        ${date}, 
-        ${category}, 
-        ${receiptUrl || null}, 
-        ${isRecurring}, 
-        ${processedRecurringInterval}, 
-        ${processedNextRecurringDate}, 
-        ${userId}, 
-        ${accountId}
-      ) 
-      RETURNING *
-    `;
-
-    // Update account balance
-    if (type === 'INCOME') {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance + ${parseFloat(amount)} 
-        WHERE id = ${accountId} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance - ${parseFloat(amount)} 
-        WHERE id = ${accountId} AND user_id = ${userId}
-      `;
-    }
-
-    // Get updated account info
-    const updatedAccount = await sql`
-      SELECT name, balance FROM accounts WHERE id = ${accountId}
-    `;
-
-    console.log('✅ Transaction added successfully');
-    
-    res.status(201).json({
-      message: 'Transaction added successfully',
-      transaction: transactionResult[0],
-      updatedAccount: updatedAccount[0]
-    });
-  } catch (error) {
-    console.error('❌ Error adding transaction:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to add transaction'
-    });
+  if (!account) {
+    return res.status(404).json({ message: 'Account not found' });
   }
+
+  const transactionPayload = buildTransactionPayload(req.body);
+
+  if (!transactionPayload.amount || transactionPayload.amount <= 0) {
+    return res.status(400).json({ message: 'Amount must be greater than 0' });
+  }
+
+  const transaction = await Transaction.create({
+    ...transactionPayload,
+    user: req.userId,
+    account: account._id,
+  });
+
+  await applyAccountDelta(account._id, signedAmount(transaction.type, transaction.amount));
+  const populated = await transaction.populate('account', 'name type');
+
+  return res.status(201).json({
+    success: true,
+    transaction: serializeTransaction(populated),
+  });
 };
 
 export const getTransactions = async (req, res) => {
-  try {
-    const userId = req.userId;
-    const { page = 1, limit = 10, type, startDate, endDate, accountId } = req.query;
-    
-    console.log('🔄 Fetching transactions for user:', userId, { page, limit, type, accountId });
+  const page = Number(req.query.page) || 1;
+  const limit = Number(req.query.limit) || 10;
+  const filters = { user: req.userId };
 
-    // Build query using tagged template literals
-    let query = sql`
-      SELECT 
-        t.*, 
-        a.name as account_name 
-      FROM transactions t 
-      JOIN accounts a ON t.account_id = a.id 
-      WHERE t.user_id = ${userId}
-    `;
-
-    // Add filters using template literals
-    if (type) {
-      query = sql`${query} AND t.type = ${type}`;
-    }
-
-    if (accountId) {
-      query = sql`${query} AND t.account_id = ${accountId}`;
-    }
-
-    if (startDate && endDate) {
-      query = sql`${query} AND t.date >= ${startDate} AND t.date <= ${endDate}`;
-    }
-
-    // Add ordering and pagination
-    query = sql`
-      ${query} 
-      ORDER BY t.date DESC, t.created_at DESC 
-      LIMIT ${parseInt(limit)} 
-      OFFSET ${(parseInt(page) - 1) * parseInt(limit)}
-    `;
-
-    const transactionsResult = await query;
-
-    // Get total count
-    let countQuery = sql`
-      SELECT COUNT(*) as total_count
-      FROM transactions t
-      WHERE t.user_id = ${userId}
-    `;
-
-    if (type) {
-      countQuery = sql`${countQuery} AND t.type = ${type}`;
-    }
-
-    if (accountId) {
-      countQuery = sql`${countQuery} AND t.account_id = ${accountId}`;
-    }
-
-    if (startDate && endDate) {
-      countQuery = sql`${countQuery} AND t.date >= ${startDate} AND t.date <= ${endDate}`;
-    }
-
-    const countResult = await countQuery;
-    const totalCount = parseInt(countResult[0].total_count);
-    const totalPages = Math.ceil(totalCount / parseInt(limit));
-
-    console.log(`✅ Found ${transactionsResult.length} transactions`);
-
-    res.json({
-      transactions: transactionsResult,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalCount,
-        totalPages,
-        hasNext: parseInt(page) < totalPages,
-        hasPrev: parseInt(page) > 1
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error fetching transactions:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to fetch transactions'
-    });
+  if (req.query.type) {
+    filters.type = req.query.type;
   }
-};
 
-export const getTransactionById = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.userId;
-
-    console.log('🔄 Fetching transaction:', id);
-
-    const result = await sql`
-      SELECT 
-        t.*, 
-        a.name as account_name 
-      FROM transactions t 
-      JOIN accounts a ON t.account_id = a.id 
-      WHERE t.id = ${id} AND t.user_id = ${userId}
-    `;
-
-    if (result.length === 0) {
-      return res.status(404).json({ 
-        error: 'Transaction not found or access denied' 
-      });
-    }
-
-    console.log('✅ Transaction found');
-
-    res.json({
-      transaction: result[0]
-    });
-  } catch (error) {
-    console.error('❌ Error fetching transaction:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to fetch transaction'
-    });
+  if (req.query.accountId) {
+    filters.account = req.query.accountId;
   }
+
+  if (req.query.startDate || req.query.endDate) {
+    filters.date = {};
+    if (req.query.startDate) filters.date.$gte = new Date(req.query.startDate);
+    if (req.query.endDate) filters.date.$lte = new Date(req.query.endDate);
+  }
+
+  if (req.query.search) {
+    filters.$or = [
+      { description: { $regex: req.query.search, $options: 'i' } },
+      { category: { $regex: req.query.search, $options: 'i' } },
+      { source: { $regex: req.query.search, $options: 'i' } },
+    ];
+  }
+
+  const [transactions, total] = await Promise.all([
+    Transaction.find(filters)
+      .populate('account', 'name type')
+      .sort({ date: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    Transaction.countDocuments(filters),
+  ]);
+
+  return res.json({
+    success: true,
+    transactions: transactions.map(serializeTransaction),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  });
 };
 
 export const updateTransaction = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.userId;
-    const {
-      type,
-      amount,
-      description,
-      date,
-      category,
-      receiptUrl,
-      isRecurring = false,
-      recurringInterval,
-      nextRecurringDate,
-      accountId
-    } = req.body;
+  const { id } = req.params;
+  const existing = await Transaction.findOne({ _id: id, user: req.userId });
 
-    console.log('🔄 Updating transaction:', id, req.body);
-
-    // Handle empty dates - convert to null
-    const processedNextRecurringDate = nextRecurringDate && nextRecurringDate !== '' 
-      ? nextRecurringDate 
-      : null;
-    
-    const processedRecurringInterval = (isRecurring && recurringInterval) 
-      ? recurringInterval 
-      : null;
-
-    // Get the original transaction first to calculate balance changes
-    const originalTransaction = await sql`
-      SELECT type, amount, account_id 
-      FROM transactions 
-      WHERE id = ${id} AND user_id = ${userId}
-    `;
-
-    if (originalTransaction.length === 0) {
-      return res.status(404).json({ 
-        error: 'Transaction not found or access denied' 
-      });
-    }
-
-    const original = originalTransaction[0];
-
-    // Revert original transaction's effect on balance
-    if (original.type === 'INCOME') {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance - ${parseFloat(original.amount)} 
-        WHERE id = ${original.account_id} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance + ${parseFloat(original.amount)} 
-        WHERE id = ${original.account_id} AND user_id = ${userId}
-      `;
-    }
-
-    // Update the transaction
-    const updatedTransaction = await sql`
-      UPDATE transactions 
-      SET 
-        type = ${type},
-        amount = ${parseFloat(amount)},
-        description = ${description},
-        date = ${date},
-        category = ${category},
-        receipt_url = ${receiptUrl || null},
-        is_recurring = ${isRecurring},
-        recurring_interval = ${processedRecurringInterval},
-        next_recurring_date = ${processedNextRecurringDate},
-        account_id = ${accountId},
-        updated_at = NOW()
-      WHERE id = ${id} AND user_id = ${userId}
-      RETURNING *
-    `;
-
-    if (updatedTransaction.length === 0) {
-      throw new Error('Transaction update failed');
-    }
-
-    // Apply new transaction's effect on balance
-    if (type === 'INCOME') {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance + ${parseFloat(amount)} 
-        WHERE id = ${accountId} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance - ${parseFloat(amount)} 
-        WHERE id = ${accountId} AND user_id = ${userId}
-      `;
-    }
-
-    console.log('✅ Transaction updated successfully');
-
-    res.json({
-      message: 'Transaction updated successfully',
-      transaction: updatedTransaction[0]
-    });
-  } catch (error) {
-    console.error('❌ Error updating transaction:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to update transaction'
-    });
+  if (!existing) {
+    return res.status(404).json({ message: 'Transaction not found' });
   }
+
+  const nextAccountId = req.body.accountId || existing.account.toString();
+  const nextAccount = await getUserAccount(req.userId, nextAccountId);
+
+  if (!nextAccount) {
+    return res.status(404).json({ message: 'Account not found' });
+  }
+
+  await applyAccountDelta(existing.account, -signedAmount(existing.type, existing.amount));
+
+  const nextPayload = buildTransactionPayload(
+    {
+      ...existing.toObject(),
+      ...req.body,
+      type: req.body.type || existing.type,
+      category: req.body.category || existing.category,
+      description: req.body.description || existing.description,
+      amount: req.body.amount || existing.amount,
+      date: req.body.date || existing.date,
+      source: req.body.source || existing.source,
+      smsRaw: req.body.smsRaw || existing.smsRaw,
+      importBatchId: req.body.importBatchId || existing.importBatchId,
+    },
+    existing.source
+  );
+
+  existing.type = nextPayload.type;
+  existing.amount = nextPayload.amount;
+  existing.category = nextPayload.category;
+  existing.date = nextPayload.date;
+  existing.description = nextPayload.description;
+  existing.source = nextPayload.source;
+  existing.smsRaw = nextPayload.smsRaw;
+  existing.importBatchId = nextPayload.importBatchId;
+  existing.account = nextAccount._id;
+  await existing.save();
+
+  await applyAccountDelta(existing.account, signedAmount(existing.type, existing.amount));
+  const populated = await existing.populate('account', 'name type');
+
+  return res.json({
+    success: true,
+    transaction: serializeTransaction(populated),
+  });
 };
 
 export const deleteTransaction = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.userId;
+  const { id } = req.params;
+  const transaction = await Transaction.findOneAndDelete({ _id: id, user: req.userId });
 
-    console.log('🔄 Deleting transaction:', id);
-
-    // Get the transaction first to revert balance changes
-    const transaction = await sql`
-      SELECT type, amount, account_id 
-      FROM transactions 
-      WHERE id = ${id} AND user_id = ${userId}
-    `;
-
-    if (transaction.length === 0) {
-      return res.status(404).json({ 
-        error: 'Transaction not found or access denied' 
-      });
-    }
-
-    const { type, amount, account_id } = transaction[0];
-
-    // Revert balance changes
-    if (type === 'INCOME') {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance - ${parseFloat(amount)} 
-        WHERE id = ${account_id} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        UPDATE accounts 
-        SET balance = balance + ${parseFloat(amount)} 
-        WHERE id = ${account_id} AND user_id = ${userId}
-      `;
-    }
-
-    // Delete the transaction
-    const deletedTransaction = await sql`
-      DELETE FROM transactions 
-      WHERE id = ${id} AND user_id = ${userId}
-      RETURNING *
-    `;
-
-    console.log('✅ Transaction deleted successfully');
-
-    res.json({
-      message: 'Transaction deleted successfully',
-      transaction: deletedTransaction[0]
-    });
-  } catch (error) {
-    console.error('❌ Error deleting transaction:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to delete transaction'
-    });
+  if (!transaction) {
+    return res.status(404).json({ message: 'Transaction not found' });
   }
+
+  await applyAccountDelta(transaction.account, -signedAmount(transaction.type, transaction.amount));
+
+  return res.json({
+    success: true,
+    message: 'Transaction deleted successfully',
+  });
+};
+
+const importParsedTransactions = async (parsedTransactions, defaultAccountId, userId) => {
+  const batchId = `batch_${Date.now()}`;
+  const accounts = await Account.find({ user: userId });
+
+  if (!accounts.length) {
+    throw new Error('Create at least one account before importing transactions');
+  }
+
+  const accountMap = new Map(accounts.map((account) => [account.name.toLowerCase(), account]));
+  const fallbackAccount =
+    accounts.find((account) => account._id.toString() === defaultAccountId) || accounts[0];
+
+  const createdTransactions = [];
+
+  for (const entry of parsedTransactions) {
+    const matchedAccount =
+      accountMap.get(entry.accountName?.toLowerCase?.()) ||
+      fallbackAccount;
+
+    const transaction = await Transaction.create({
+      user: userId,
+      account: matchedAccount._id,
+      type: entry.type,
+      amount: entry.amount,
+      category: validateCategory(entry.type, entry.category),
+      date: entry.date,
+      description: entry.description,
+      source: entry.source,
+      smsRaw: entry.smsRaw || '',
+      importBatchId: batchId,
+    });
+
+    await applyAccountDelta(matchedAccount._id, signedAmount(entry.type, entry.amount));
+    createdTransactions.push(await transaction.populate('account', 'name type'));
+  }
+
+  return {
+    batchId,
+    transactions: createdTransactions.map(serializeTransaction),
+  };
+};
+
+export const importTransactionsFromCsv = async (req, res) => {
+  const parsed = parseCsvTransactions(req.body.csvText);
+  const result = await importParsedTransactions(parsed, req.body.defaultAccountId, req.userId);
+
+  return res.status(201).json({
+    success: true,
+    importedCount: result.transactions.length,
+    batchId: result.batchId,
+    transactions: result.transactions,
+  });
+};
+
+export const importTransactionsFromSms = async (req, res) => {
+  const parsed = parseSmsTransactions(req.body.smsText);
+  const result = await importParsedTransactions(parsed, req.body.defaultAccountId, req.userId);
+
+  return res.status(201).json({
+    success: true,
+    importedCount: result.transactions.length,
+    batchId: result.batchId,
+    transactions: result.transactions,
+  });
 };

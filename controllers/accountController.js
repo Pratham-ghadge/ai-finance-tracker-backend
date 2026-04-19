@@ -1,127 +1,91 @@
-// backend/controllers/accountController.js
-import sql from '../config/database.js';
+import Account from '../models/Account.js';
+import Transaction from '../models/Transaction.js';
+import { accountTypes } from '../utils/constants.js';
+import { serializeAccount } from '../utils/serializers.js';
 
 export const createAccount = async (req, res) => {
-  try {
-    const { name, type, initialBalance = 0 } = req.body;
-    const userId = req.userId;
+  const { name, type = 'BANK', initialBalance = 0 } = req.body;
 
-    console.log('🔄 Creating account:', { name, type, initialBalance, userId });
-
-    const result = await sql`
-      INSERT INTO accounts (name, type, balance, user_id) 
-      VALUES (${name}, ${type}, ${initialBalance}, ${userId}) 
-      RETURNING *
-    `;
-
-    console.log('✅ Account created successfully:', result[0]);
-
-    res.status(201).json({
-      message: 'Account created successfully',
-      account: result[0]
-    });
-  } catch (error) {
-    console.error('❌ Error creating account:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to create account'
-    });
+  if (!name) {
+    return res.status(400).json({ message: 'Account name is required' });
   }
+
+  if (!accountTypes.includes(type)) {
+    return res.status(400).json({ message: 'Invalid account type' });
+  }
+
+  const account = await Account.create({
+    user: req.userId,
+    name: name.trim(),
+    type,
+    balance: Number(initialBalance) || 0,
+  });
+
+  return res.status(201).json({
+    success: true,
+    account: serializeAccount(account),
+  });
 };
 
 export const getAccounts = async (req, res) => {
-  try {
-    const userId = req.userId;
-    
-    console.log('🔄 Fetching accounts for user:', userId);
+  const accounts = await Account.find({ user: req.userId }).sort({ createdAt: -1 });
 
-    const result = await sql`
-      SELECT * FROM accounts 
-      WHERE user_id = ${userId} 
-      ORDER BY created_at DESC
-    `;
-
-    console.log(`✅ Found ${result.length} accounts for user ${userId}`);
-
-    res.json({ 
-      accounts: result,
-      count: result.length 
-    });
-  } catch (error) {
-    console.error('❌ Error fetching accounts:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to fetch accounts'
-    });
-  }
+  return res.json({
+    success: true,
+    accounts: accounts.map(serializeAccount),
+  });
 };
 
 export const updateAccount = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, type, balance } = req.body;
-    const userId = req.userId;
+  const { id } = req.params;
+  const { name, type, balance } = req.body;
 
-    console.log('🔄 Updating account:', { id, name, type, balance, userId });
-
-    const result = await sql`
-      UPDATE accounts 
-      SET name = ${name}, type = ${type}, balance = ${balance}, updated_at = NOW()
-      WHERE id = ${id} AND user_id = ${userId}
-      RETURNING *
-    `;
-
-    if (result.length === 0) {
-      return res.status(404).json({ 
-        error: 'Account not found or access denied' 
-      });
-    }
-
-    console.log('✅ Account updated successfully:', result[0]);
-
-    res.json({
-      message: 'Account updated successfully',
-      account: result[0]
-    });
-  } catch (error) {
-    console.error('❌ Error updating account:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to update account'
-    });
+  const account = await Account.findOne({ _id: id, user: req.userId });
+  if (!account) {
+    return res.status(404).json({ message: 'Account not found' });
   }
+
+  if (type && !accountTypes.includes(type)) {
+    return res.status(400).json({ message: 'Invalid account type' });
+  }
+
+  if (typeof name === 'string' && name.trim()) {
+    account.name = name.trim();
+  }
+
+  if (type) {
+    account.type = type;
+  }
+
+  if (balance !== undefined && balance !== null && balance !== '') {
+    account.balance = Number(balance) || 0;
+  }
+
+  await account.save();
+
+  return res.json({
+    success: true,
+    account: serializeAccount(account),
+  });
 };
 
 export const deleteAccount = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.userId;
+  const { id } = req.params;
 
-    console.log('🔄 Deleting account:', { id, userId });
-
-    const result = await sql`
-      DELETE FROM accounts 
-      WHERE id = ${id} AND user_id = ${userId}
-      RETURNING *
-    `;
-
-    if (result.length === 0) {
-      return res.status(404).json({ 
-        error: 'Account not found or access denied' 
-      });
-    }
-
-    console.log('✅ Account deleted successfully:', result[0]);
-
-    res.json({
-      message: 'Account deleted successfully',
-      account: result[0]
-    });
-  } catch (error) {
-    console.error('❌ Error deleting account:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'Failed to delete account'
+  const linkedTransactions = await Transaction.countDocuments({ account: id, user: req.userId });
+  if (linkedTransactions > 0) {
+    return res.status(400).json({
+      message: 'Delete linked transactions first or move them to another account',
     });
   }
+
+  const account = await Account.findOneAndDelete({ _id: id, user: req.userId });
+  if (!account) {
+    return res.status(404).json({ message: 'Account not found' });
+  }
+
+  return res.json({
+    success: true,
+    message: 'Account deleted successfully',
+  });
 };

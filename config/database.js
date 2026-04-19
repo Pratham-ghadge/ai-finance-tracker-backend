@@ -1,24 +1,18 @@
-// backend/config/database.js
-import { neon } from '@neondatabase/serverless';
-import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 
-dotenv.config();
+export const connectDatabase = async () => {
+  const mongoUri = process.env.MONGODB_URI;
 
-// Create Neon client
-const sql = neon(process.env.DATABASE_URL);
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is required in the backend .env file');
+  }
 
-// Test connection function
-export const testConnection = async () => {
   try {
-    console.log('🔌 Testing Neon database connection...');
-    const result = await sql`SELECT version()`;
-    console.log('✅ Database connected successfully');
-    console.log('📊 PostgreSQL version:', result[0].version);
-    return { success: true, data: result };
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    console.log('MongoDB connected');
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return { success: false, error: error.message };
+    throw new Error(`Unable to connect to MongoDB at ${mongoUri}. Start MongoDB locally or update MONGODB_URI. Original error: ${error.message}`);
   }
 };
-
-export default sql;

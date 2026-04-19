@@ -1,20 +1,16 @@
-// backend/routes/accounts.js
 import express from 'express';
-import { authenticate } from '../middleware/auth.js';
-import { 
-  createAccount, 
-  getAccounts, 
-  updateAccount, 
-  deleteAccount 
+import {
+  createAccount,
+  deleteAccount,
+  getAccounts,
+  updateAccount,
 } from '../controllers/accountController.js';
+import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 
 router.use(authenticate);
-
-router.post('/', createAccount);
-router.get('/', getAccounts);
-router.put('/:id', updateAccount);
-router.delete('/:id', deleteAccount);
+router.route('/').get(getAccounts).post(createAccount);
+router.route('/:id').put(updateAccount).delete(deleteAccount);
 
 export default router;

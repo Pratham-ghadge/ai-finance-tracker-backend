@@ -1,21 +1,23 @@
-// backend/routes/transactions.js
 import express from 'express';
-import { authenticate } from '../middleware/auth.js';
-import { 
-  addTransaction, 
-  getTransactions, 
-  getTransactionById,
+import {
+  addTransaction,
+  deleteTransaction,
+  getTransactions,
+  importTransactionsFromCsv,
+  importTransactionsFromSms,
   updateTransaction,
-  deleteTransaction 
 } from '../controllers/transactionController.js';
+import { fetchSimulatedTransactions } from '../controllers/syncController.js';
+import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
 
 router.use(authenticate);
-
-router.post('/', addTransaction);
 router.get('/', getTransactions);
-router.get('/:id', getTransactionById);
+router.post('/', addTransaction);
+router.post('/import/csv', importTransactionsFromCsv);
+router.post('/import/sms', importTransactionsFromSms);
+router.post('/sync', fetchSimulatedTransactions);
 router.put('/:id', updateTransaction);
 router.delete('/:id', deleteTransaction);
 

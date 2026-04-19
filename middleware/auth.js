@@ -1,18 +1,25 @@
-// backend/middleware/auth.js
+import User from '../models/User.js';
 import { verifyToken } from '../config/auth.js';
 
 export const authenticate = async (req, res, next) => {
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
-    
+    const token = req.headers.authorization?.replace('Bearer ', '');
+
     if (!token) {
-      return res.status(401).json({ error: 'Access denied. No token provided.' });
+      return res.status(401).json({ message: 'Authentication token is required' });
     }
 
     const decoded = verifyToken(token);
-    req.userId = decoded.userId;
-    next();
+    const user = await User.findById(decoded.userId).select('-password');
+
+    if (!user) {
+      return res.status(401).json({ message: 'User session is invalid' });
+    }
+
+    req.user = user;
+    req.userId = user._id;
+    return next();
   } catch (error) {
-    res.status(401).json({ error: 'Invalid token.' });
+    return res.status(401).json({ message: 'Authentication failed' });
   }
 };
