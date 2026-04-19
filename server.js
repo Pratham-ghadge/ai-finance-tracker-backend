@@ -23,15 +23,8 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.CLIENT_URL ||
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-app.use(helmet());
-app.use(
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 250,
-    standardHeaders: true,
-    legacyHeaders: false,
-  })
-);
+console.log('Allowed CORS origins:', allowedOrigins);
+
 app.use(
   cors({
     origin(origin, callback) {
@@ -39,9 +32,23 @@ app.use(
         return callback(null, true);
       }
 
+      console.log('CORS blocked origin:', origin);
       return callback(new Error('Origin not allowed by CORS'));
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 200,
+  })
+);
+
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 250,
+    standardHeaders: true,
+    legacyHeaders: false,
   })
 );
 app.use(express.json({ limit: '2mb' }));
